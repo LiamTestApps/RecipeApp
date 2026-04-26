@@ -30,6 +30,7 @@ export type GeminiErrorKind =
   | 'no-api-key'
   | 'invalid-api-key'
   | 'invalid-url'
+  | 'url-fetch-failed'
   | 'rate-limited'
   | 'network'
   | 'timeout'
@@ -57,6 +58,8 @@ export function messageForError(err: unknown): string {
         return 'That API key was rejected. Check it in Settings.';
       case 'invalid-url':
         return err.message; // already user-friendly; produced by extractFromUrl
+      case 'url-fetch-failed':
+        return "Gemini couldn't load that page (some sites block automated access). Try a different recipe URL, or use Smart Extract with the recipe text instead.";
       case 'rate-limited':
         return 'Too many requests. Try again in a minute.';
       case 'network':
@@ -325,11 +328,27 @@ async function callGemini(
     if (err instanceof Error && err.name === 'AbortError') {
       throw new GeminiError('timeout', 'Request timed out.');
     }
+    // Log the underlying fetch error so the browser console shows the
+    // actual TypeError / cause (DNS, TLS, blocked, etc.) instead of just
+    // the generic "Network request failed".
+    console.error('[gemini] fetch failed:', err);
     throw new GeminiError('network', 'Network request failed.');
   }
   clearTimeout(timeout);
 
   if (!response.ok) {
+    // Log the body so the console reveals exactly what Google returned
+    // (often a structured error message we'd otherwise mask behind our
+    // generic codes).
+    try {
+      const errBody = await response.clone().text();
+      console.error(
+        `[gemini] HTTP ${response.status}:`,
+        errBody.slice(0, 500),
+      );
+    } catch {
+      // ignore
+    }
     if (response.status === 400 || response.status === 401 || response.status === 403) {
       throw new GeminiError('invalid-api-key', `API key rejected (${response.status}).`);
     }
@@ -346,7 +365,24 @@ async function callGemini(
     throw new GeminiError('malformed-response', 'Response was not valid JSON.');
   }
 
-  return parseGeminiResponse(payload);
+  return parseGeminiResponseWithLogging(payload);
+}
+
+function parseGeminiResponseWithLogging(payload: unknown): ExtractedRecipe {
+  try {
+    return parseGeminiResponse(payload);
+  } catch (err) {
+    // Dump the raw payload so we can see exactly what Gemini returned
+    // when something didn't parse. Useful for debugging URL fetches
+    // that succeed at the HTTP level but produce unexpected content.
+    if (err instanceof GeminiError && err.kind !== 'safety-blocked') {
+      console.error(
+        '[gemini] response parse failed (' + err.kind + '). Payload:',
+        payload,
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -409,8 +445,8 @@ function parseGeminiResponse(payload: unknown): ExtractedRecipe {
     );
     if (failed) {
       throw new GeminiError(
-        'network',
-        "Couldn't fetch that page. Check the URL and try again.",
+        'url-fetch-failed',
+        "Couldn't fetch that page.",
       );
     }
   }
