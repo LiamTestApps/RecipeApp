@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import {
   DndContext,
   PointerSensor,
@@ -24,18 +25,22 @@ interface Props {
   onChange: (steps: StepDraft[]) => void;
 }
 
-interface RowWithKey extends StepDraft {
-  _key: string;
-}
-
 /**
  * Step editor (spec §5.4.2). Step numbers update automatically on reorder.
+ *
+ * See IngredientEditor for the rationale behind the stable-uid pattern —
+ * deriving keys from row content unmounts inputs on every keystroke.
  */
 export default function StepEditor({ steps, onChange }: Props) {
-  const rows: RowWithKey[] = steps.map((s, idx) => ({
-    ...s,
-    _key: `${idx}-${s.instruction.slice(0, 20)}`,
-  }));
+  const nextUid = useRef(0);
+  const uids = useRef<number[]>([]);
+
+  while (uids.current.length < steps.length) {
+    uids.current.push(nextUid.current++);
+  }
+  if (uids.current.length > steps.length) {
+    uids.current.length = steps.length;
+  }
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -48,9 +53,10 @@ export default function StepEditor({ steps, onChange }: Props) {
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const oldIndex = rows.findIndex((r) => r._key === active.id);
-    const newIndex = rows.findIndex((r) => r._key === over.id);
+    const oldIndex = uids.current.indexOf(Number(active.id));
+    const newIndex = uids.current.indexOf(Number(over.id));
     if (oldIndex < 0 || newIndex < 0) return;
+    uids.current = arrayMove(uids.current, oldIndex, newIndex);
     const reordered = arrayMove(steps, oldIndex, newIndex);
     onChange(reordered.map((s, i) => ({ ...s, stepNumber: i + 1 })));
   };
@@ -62,6 +68,7 @@ export default function StepEditor({ steps, onChange }: Props) {
   };
 
   const removeRow = (index: number) => {
+    uids.current.splice(index, 1);
     onChange(
       steps
         .filter((_, i) => i !== index)
@@ -70,6 +77,7 @@ export default function StepEditor({ steps, onChange }: Props) {
   };
 
   const addRow = () => {
+    uids.current.push(nextUid.current++);
     onChange([
       ...steps,
       { stepNumber: steps.length + 1, instruction: '' },
@@ -84,13 +92,14 @@ export default function StepEditor({ steps, onChange }: Props) {
         onDragEnd={handleDragEnd}
       >
         <SortableContext
-          items={rows.map((r) => r._key)}
+          items={uids.current}
           strategy={verticalListSortingStrategy}
         >
           <div className="space-y-2">
-            {rows.map((row, index) => (
+            {steps.map((row, index) => (
               <SortableStepRow
-                key={row._key}
+                key={uids.current[index]}
+                uid={uids.current[index]!}
                 row={row}
                 number={index + 1}
                 onUpdate={(v) => updateRow(index, v)}
@@ -119,12 +128,14 @@ export default function StepEditor({ steps, onChange }: Props) {
 }
 
 function SortableStepRow({
+  uid,
   row,
   number,
   onUpdate,
   onRemove,
 }: {
-  row: RowWithKey;
+  uid: number;
+  row: StepDraft;
   number: number;
   onUpdate: (instruction: string) => void;
   onRemove: () => void;
@@ -136,7 +147,7 @@ function SortableStepRow({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: row._key });
+  } = useSortable({ id: uid });
 
   const style = {
     transform: CSS.Transform.toString(transform),

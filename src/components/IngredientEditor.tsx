@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import {
   DndContext,
   PointerSensor,
@@ -25,32 +26,37 @@ interface Props {
   onSmartExtractClick: () => void;
 }
 
-interface RowWithKey extends IngredientDraft {
-  /** Stable client-side identity so dnd-kit can track rows that have no DB id yet. */
-  _key: string;
-}
-
 /**
  * Ingredient editor (spec §5.4.1).
  *
- * Layout per row:
- *   [drag] [qty] [unit] [name──────────] [×]
- *          [notes (placeholder text below)]
- *
- * The trailing notes field gets its own row so the four-field row doesn't
- * collapse on 360px viewports.
+ * IMPORTANT: each row needs a *stable* React key that is unrelated to the
+ * row's content — otherwise typing in the name field changes the key,
+ * unmounts the input, and yanks focus. We mint a numeric uid per row
+ * the first time we see it and keep those uids in a parallel array (a
+ * ref) aligned by index with `ingredients`. Reorders shuffle the uid
+ * array the same way as the data; adds append a fresh uid; removes
+ * splice it out.
  */
 export default function IngredientEditor({
   ingredients,
   onChange,
   onSmartExtractClick,
 }: Props) {
-  // Project rows with stable keys for dnd-kit. We re-key only when rows are
-  // added/removed — reorders preserve keys.
-  const rows: RowWithKey[] = ingredients.map((ing, idx) => ({
-    ...ing,
-    _key: `${idx}-${ing.name}-${ing.quantity ?? ''}-${ing.unit ?? ''}`,
-  }));
+  // The next uid to mint. Counter is per-component-instance and survives
+  // for as long as the form is mounted, which is exactly what we need.
+  const nextUid = useRef(0);
+  // uids[i] is the stable key for ingredients[i]. Length must match.
+  const uids = useRef<number[]>([]);
+
+  // Pad the uid array if new rows arrived from the parent (e.g. hydration
+  // from the loaded recipe in edit mode, or any external setDraft).
+  while (uids.current.length < ingredients.length) {
+    uids.current.push(nextUid.current++);
+  }
+  // Truncate if rows shrank (shouldn't happen via normal flow, but guard).
+  if (uids.current.length > ingredients.length) {
+    uids.current.length = ingredients.length;
+  }
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -63,9 +69,10 @@ export default function IngredientEditor({
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const oldIndex = rows.findIndex((r) => r._key === active.id);
-    const newIndex = rows.findIndex((r) => r._key === over.id);
+    const oldIndex = uids.current.indexOf(Number(active.id));
+    const newIndex = uids.current.indexOf(Number(over.id));
     if (oldIndex < 0 || newIndex < 0) return;
+    uids.current = arrayMove(uids.current, oldIndex, newIndex);
     const reordered = arrayMove(ingredients, oldIndex, newIndex);
     onChange(reordered.map((r, i) => ({ ...r, sortOrder: i })));
   };
@@ -77,12 +84,14 @@ export default function IngredientEditor({
   };
 
   const removeRow = (index: number) => {
+    uids.current.splice(index, 1);
     onChange(
       ingredients.filter((_, i) => i !== index).map((r, i) => ({ ...r, sortOrder: i })),
     );
   };
 
   const addRow = () => {
+    uids.current.push(nextUid.current++);
     onChange([
       ...ingredients,
       {
@@ -103,13 +112,14 @@ export default function IngredientEditor({
         onDragEnd={handleDragEnd}
       >
         <SortableContext
-          items={rows.map((r) => r._key)}
+          items={uids.current}
           strategy={verticalListSortingStrategy}
         >
           <div className="space-y-2">
-            {rows.map((row, index) => (
+            {ingredients.map((row, index) => (
               <SortableIngredientRow
-                key={row._key}
+                key={uids.current[index]}
+                uid={uids.current[index]!}
                 row={row}
                 onUpdate={(patch) => updateRow(index, patch)}
                 onRemove={() => removeRow(index)}
@@ -146,11 +156,13 @@ export default function IngredientEditor({
 }
 
 function SortableIngredientRow({
+  uid,
   row,
   onUpdate,
   onRemove,
 }: {
-  row: RowWithKey;
+  uid: number;
+  row: IngredientDraft;
   onUpdate: (patch: Partial<IngredientDraft>) => void;
   onRemove: () => void;
 }) {
@@ -161,7 +173,7 @@ function SortableIngredientRow({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: row._key });
+  } = useSortable({ id: uid });
 
   const style = {
     transform: CSS.Transform.toString(transform),
