@@ -1,0 +1,96 @@
+/*
+ * Tailwind v4 uses CSS-first config. The @theme block below defines our
+ * design tokens; Tailwind generates utilities from them automatically
+ * (e.g. bg-sage-500, text-stone-700, font-display, etc).
+ *
+ * Palette: sage (muted moss green) on stone (warm grey).
+ * Fonts:   Fraunces (variable serif, soft axis) for display,
+ *          Manrope (variable sans, refined) for body.
+ */
+
+@import "tailwindcss";
+
+@import "@fontsource-variable/fraunces";
+@import "@fontsource-variable/manrope";
+
+/* Manual dark-mode override: toggle the `dark` class on <html>. Default behaviour without the class is "follow system" — see main.tsx. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Sage — generated in OKLCH so the steps perceptually match. */
+  --color-sage-50: oklch(0.97 0.012 130);
+  --color-sage-100: oklch(0.94 0.022 130);
+  --color-sage-200: oklch(0.88 0.038 130);
+  --color-sage-300: oklch(0.79 0.055 130);
+  --color-sage-400: oklch(0.69 0.07 130);
+  --color-sage-500: oklch(0.59 0.075 130);
+  --color-sage-600: oklch(0.49 0.07 130);
+  --color-sage-700: oklch(0.41 0.06 130);
+  --color-sage-800: oklch(0.34 0.05 130);
+  --color-sage-900: oklch(0.27 0.04 130);
+  --color-sage-950: oklch(0.20 0.03 130);
+
+  /* Fonts (Tailwind exposes these as font-display / font-sans utilities). */
+  --font-display: 'Fraunces Variable', Georgia, 'Times New Roman', serif;
+  --font-sans: 'Manrope Variable', system-ui, -apple-system, sans-serif;
+
+  /* Spec 10.2: minimum tap target 48px. */
+  --spacing-tap: 3rem; /* 48px */
+}
+
+/* Base layer: sensible defaults so pages feel right without classes. */
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  html,
+  body {
+    @apply bg-stone-50 text-stone-900;
+  }
+
+  html.dark,
+  html.dark body {
+    @apply bg-stone-950 text-stone-100;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    font-feature-settings: 'ss01', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    font-variation-settings: 'SOFT' 50, 'opsz' 48;
+    letter-spacing: -0.01em;
+  }
+
+  /* Pleasant focus ring across the app. */
+  :focus-visible {
+    outline: 2px solid var(--color-sage-500);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Respect iOS / Android safe areas. */
+  body {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Reusable utility for the bottom-nav safe-area inset on Android. */
+@layer utilities {
+  .pb-safe {
+    padding-bottom: max(env(safe-area-inset-bottom), 0.5rem);
+  }
+  .h-tap {
+    min-height: var(--spacing-tap);
+  }
+  .w-tap {
+    min-width: var(--spacing-tap);
+  }
+}
