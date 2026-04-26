@@ -213,21 +213,32 @@ export async function testApiKey(candidateKey: string): Promise<boolean> {
 }
 
 /**
- * Extract a recipe from a URL. Gemini's URL Context tool fetches the page
- * server-side (no CORS issue), then the model parses it into our schema.
+ * Extract a recipe from a URL.
+ *
+ * Two-stage approach:
+ *
+ *   1. Ask Gemini's URL Context tool to fetch and parse the page itself.
+ *      This is fast and avoids any third party. Works for ~80% of sites.
+ *
+ *   2. If Gemini reports it couldn't reach the page (BBC, NYT, anything
+ *      behind aggressive bot protection), fall back to fetching the
+ *      HTML through corsproxy.io and feeding the raw HTML to Gemini
+ *      with normal schema-mode parsing.
+ *
+ * The two-stage design means most users never hit a third-party proxy,
+ * and only the small fraction of bot-blocked sites pay the extra
+ * latency. Other error kinds (auth, safety, rate-limit) are not
+ * retried — only `url-fetch-failed`.
  *
  * Throws GeminiError with kind:
- *   - 'no-api-key'        — user hasn't set a key
- *   - 'invalid-url'       — couldn't even parse the input as a URL
- *   - 'network'           — Gemini couldn't fetch the page (or our fetch failed)
- *   - 'malformed-response'— page didn't contain a recognisable recipe
- *   - the usual auth/rate/safety errors
+ *   - 'no-api-key', 'invalid-api-key', 'invalid-url'
+ *   - 'url-fetch-failed' — both stages couldn't fetch the page
+ *   - 'malformed-response' — page fetched but didn't contain a recipe
+ *   - the usual rate/safety/network/timeout errors
  */
 export async function extractFromUrl(rawUrl: string): Promise<ExtractedRecipe> {
   const url = rawUrl.trim();
 
-  // Cheap client-side URL validation. Saves a Gemini call when the user
-  // pastes garbage or accidentally double-pastes.
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -238,6 +249,22 @@ export async function extractFromUrl(rawUrl: string): Promise<ExtractedRecipe> {
     throw new GeminiError('invalid-url', 'URL must start with http:// or https://');
   }
 
+  try {
+    return await extractFromUrlViaGemini(url);
+  } catch (err) {
+    // Only fall through for fetch-failure. Auth/rate/safety errors
+    // would re-fail the same way on the second attempt, and
+    // malformed-response means the page WAS fetched, just not parseable.
+    if (err instanceof GeminiError && err.kind === 'url-fetch-failed') {
+      console.info('[gemini] URL Context failed; falling back to proxy fetch.');
+      return await extractFromUrlViaProxy(url);
+    }
+    throw err;
+  }
+}
+
+/** Stage 1: ask Gemini to fetch the page itself via its URL Context tool. */
+async function extractFromUrlViaGemini(url: string): Promise<ExtractedRecipe> {
   // Note: no responseSchema here — see CallOptions doc. The prompt does
   // the schema's job by being very explicit about output shape.
   const prompt = `Visit the URL below and extract the recipe.
@@ -267,6 +294,75 @@ Rules:
 - If the page is not a recipe (e.g. a blog index, an article, a 404 page), return {"title":"","ingredients":[],"steps":[]}.`;
 
   return callGemini(prompt, { withUrlContext: true, timeoutMs: 60_000 });
+}
+
+/**
+ * Stage 2: fetch the page through a public CORS proxy, then ask Gemini
+ * to parse the HTML. We can use schema mode here because there's no
+ * url_context tool to clash with it.
+ *
+ * corsproxy.io was chosen for current reliability (Germany-hosted,
+ * GDPR-compliant, no API key needed for basic use). If it ever stops
+ * working, swap the URL below — the rest of the logic is independent
+ * of the specific proxy.
+ */
+async function extractFromUrlViaProxy(url: string): Promise<ExtractedRecipe> {
+  const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+
+  let html: string;
+  try {
+    const res = await fetch(proxyUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.error(`[gemini] proxy returned HTTP ${res.status}`);
+      throw new GeminiError(
+        'url-fetch-failed',
+        "Couldn't fetch that page (the recipe site may block bots).",
+      );
+    }
+    html = await res.text();
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err instanceof GeminiError) throw err;
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new GeminiError('timeout', 'Request timed out fetching the page.');
+    }
+    console.error('[gemini] proxy fetch failed:', err);
+    throw new GeminiError(
+      'url-fetch-failed',
+      "Couldn't reach the proxy used to fetch the page.",
+    );
+  }
+
+  // Cap the HTML we send to Gemini at 300 KB to avoid burning tokens on
+  // huge, image-heavy pages. The recipe content is virtually always in
+  // the first chunk of any reasonable page.
+  const MAX_HTML_BYTES = 300_000;
+  const truncated = html.length > MAX_HTML_BYTES ? html.slice(0, MAX_HTML_BYTES) : html;
+
+  const prompt = `The following is the HTML source of a recipe webpage. Extract the recipe into structured fields.
+
+Source URL: ${url}
+
+Rules:
+- Look for Schema.org Recipe data (in <script type="application/ld+json"> blocks) first if present — it's the cleanest source.
+- Otherwise extract from visible page content.
+- Preserve quantities exactly as written (fractions like "1/2", ranges like "1-2"). Use null when no quantity is given.
+- Keep units in their original form ("cup", "g", "tbsp"). Use null when there is no unit.
+- Put the bare ingredient name in "name". Move descriptors ("finely chopped", "large", "ripe") into "notes".
+- Steps are concise, one per logical action.
+- Times in minutes; null if not stated.
+- If the HTML is not a recipe page, return an empty title with empty arrays.
+
+HTML:
+---
+${truncated}
+---`;
+
+  return callGemini(prompt);
 }
 
 // ─── Internal ────────────────────────────────────────────────────────────────
