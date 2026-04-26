@@ -251,8 +251,18 @@ export async function deleteSetting(key: string): Promise<void> {
   await db.settings.delete(key);
 }
 
-export async function getApiKey(): Promise<string | undefined> {
-  return getSetting(SETTING_KEYS.GEMINI_API_KEY);
+/**
+ * Returns the saved Gemini API key, or `null` if no key has been saved.
+ *
+ * This deliberately uses `null` rather than `undefined` for "no key set"
+ * so that callers using `useLiveQuery(() => getApiKey())` can distinguish
+ * between "still loading" (undefined) and "loaded, no key" (null). With
+ * the previous undefined-on-both, `isLoading` would never flip to false
+ * for first-time users, leaving the API key input permanently disabled.
+ */
+export async function getApiKey(): Promise<string | null> {
+  const value = await getSetting(SETTING_KEYS.GEMINI_API_KEY);
+  return value ?? null;
 }
 
 export async function setApiKey(value: string): Promise<void> {
@@ -319,3 +329,4 @@ async function writeTagsForRecipe(
 
   await db.recipeTags.bulkAdd(tagIds.map((tagId) => ({ recipeId, tagId })));
 }
+
