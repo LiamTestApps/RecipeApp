@@ -13,12 +13,18 @@ import type {
 
 // ─── Recipes ─────────────────────────────────────────────────────────────────
 
-/** Fetch a single recipe with its ingredients, steps, and tags. */
+/**
+ * Fetch a single recipe with its ingredients, steps, and tags.
+ *
+ * Returns `null` when the recipe doesn't exist — this lets callers using
+ * dexie-react-hooks distinguish "not found" (null) from "still loading"
+ * (undefined, which useLiveQuery returns until the query resolves).
+ */
 export async function getRecipeWithRelations(
   id: number,
-): Promise<RecipeWithRelations | undefined> {
+): Promise<RecipeWithRelations | null> {
   const recipe = await db.recipes.get(id);
-  if (!recipe) return undefined;
+  if (!recipe) return null;
 
   const [ingredients, steps, tags] = await Promise.all([
     db.ingredients
