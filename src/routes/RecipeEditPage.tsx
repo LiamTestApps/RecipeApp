@@ -13,6 +13,8 @@ import TagInput from '../components/TagInput';
 import IngredientEditor from '../components/IngredientEditor';
 import StepEditor from '../components/StepEditor';
 import ConfirmDialog from '../components/ConfirmDialog';
+import SmartExtractModal from '../components/SmartExtractModal';
+import type { ExtractedRecipe } from '../lib/gemini';
 import { cx } from '../lib/utils';
 
 interface Props {
@@ -62,6 +64,7 @@ export default function RecipeEditPage({ mode }: Props) {
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [smartExtractOpen, setSmartExtractOpen] = useState(false);
 
   // Hydrate the draft from an existing recipe in edit mode.
   useEffect(() => {
@@ -226,11 +229,7 @@ export default function RecipeEditPage({ mode }: Props) {
           <IngredientEditor
             ingredients={draft.ingredients}
             onChange={(v) => setDraft({ ...draft, ingredients: v })}
-            onSmartExtractClick={() => {
-              alert(
-                'Smart Extract ships in the next pass — it parses pasted recipe text via Gemini and pre-fills the editor.',
-              );
-            }}
+            onSmartExtractClick={() => setSmartExtractOpen(true)}
           />
         </Field>
 
@@ -291,6 +290,35 @@ export default function RecipeEditPage({ mode }: Props) {
           goBack();
         }}
         onCancel={() => setConfirmDiscard(false)}
+      />
+
+      <SmartExtractModal
+        open={smartExtractOpen}
+        onClose={() => setSmartExtractOpen(false)}
+        onApply={(extracted: ExtractedRecipe) => {
+          // Apply directly to the draft. The user chose this UX over a
+          // preview screen — they'll edit anything they don't like.
+          setDraft({
+            ...draft,
+            // Only overwrite the title if the field is currently blank;
+            // a user mid-typing shouldn't lose their title.
+            title: draft.title.trim() ? draft.title : extracted.title,
+            prepTimeMinutes: extracted.prepTimeMinutes ?? draft.prepTimeMinutes,
+            cookTimeMinutes: extracted.cookTimeMinutes ?? draft.cookTimeMinutes,
+            ingredients: extracted.ingredients.map((ing, idx) => ({
+              quantity: ing.quantity,
+              unit: ing.unit,
+              name: ing.name,
+              notes: ing.notes,
+              sortOrder: idx,
+            })),
+            steps: extracted.steps.map((instruction, idx) => ({
+              stepNumber: idx + 1,
+              instruction,
+            })),
+          });
+          setSmartExtractOpen(false);
+        }}
       />
     </>
   );

@@ -8,7 +8,6 @@ import AppLayout from './layouts/AppLayout';
 import HomePage from './routes/HomePage';
 import RecipeDetailPage from './routes/RecipeDetailPage';
 import RecipeEditPage from './routes/RecipeEditPage';
-import StandardisePreviewPage from './routes/StandardisePreviewPage';
 import SettingsPage from './routes/SettingsPage';
 import NotFoundPage from './routes/NotFoundPage';
 
@@ -29,10 +28,6 @@ const routes: RouteObject[] = [
       { path: 'recipe/new', element: <RecipeEditPage mode="create" /> },
       { path: 'recipe/:id', element: <RecipeDetailPage /> },
       { path: 'recipe/:id/edit', element: <RecipeEditPage mode="edit" /> },
-      {
-        path: 'recipe/:id/standardise',
-        element: <StandardisePreviewPage />,
-      },
       { path: 'settings', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],

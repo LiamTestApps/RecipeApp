@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { getRecipeWithRelations, deleteRecipe } from '../db';
+import {
+  getRecipeWithRelations,
+  deleteRecipe,
+  applyStandardisation,
+} from '../db';
+import { standardiseRecipe, messageForError } from '../lib/gemini';
 import { heroColors } from '../lib/colors';
 import { formatTime, cx } from '../lib/utils';
 import StarRating from '../components/StarRating';
@@ -18,6 +23,9 @@ export default function RecipeDetailPage() {
   );
 
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmStandardise, setConfirmStandardise] = useState(false);
+  const [standardising, setStandardising] = useState(false);
+  const [standardiseError, setStandardiseError] = useState<string | null>(null);
   const [notesOpen, setNotesOpen] = useState(true);
 
   // Track theme for the hero (same pattern as HomePage).
@@ -49,6 +57,57 @@ export default function RecipeDetailPage() {
   const handleDelete = async () => {
     await deleteRecipe(recipeId);
     navigate('/', { replace: true });
+  };
+
+  const handleStandardise = async () => {
+    setConfirmStandardise(false);
+    setStandardising(true);
+    setStandardiseError(null);
+    try {
+      const ingredientsText = recipe.ingredients
+        .map((i) => {
+          const parts = [];
+          if (i.quantity) parts.push(i.quantity);
+          if (i.unit) parts.push(i.unit);
+          parts.push(i.name);
+          if (i.notes) parts.push(`(${i.notes})`);
+          return '- ' + parts.join(' ');
+        })
+        .join('\n');
+      const stepsText = recipe.steps
+        .map((s) => `${s.stepNumber}. ${s.instruction}`)
+        .join('\n');
+
+      const cleaned = await standardiseRecipe(
+        recipe.title,
+        ingredientsText,
+        stepsText,
+        recipe.prepTimeMinutes,
+        recipe.cookTimeMinutes,
+      );
+
+      await applyStandardisation(
+        recipeId,
+        cleaned.ingredients.map((i, idx) => ({
+          quantity: i.quantity,
+          unit: i.unit,
+          name: i.name,
+          notes: i.notes,
+          sortOrder: idx,
+        })),
+        cleaned.steps.map((instruction, idx) => ({
+          stepNumber: idx + 1,
+          instruction,
+        })),
+        cleaned.prepTimeMinutes,
+        cleaned.cookTimeMinutes,
+      );
+      // Live query refreshes automatically.
+    } catch (err) {
+      setStandardiseError(messageForError(err));
+    } finally {
+      setStandardising(false);
+    }
   };
 
   return (
@@ -234,12 +293,27 @@ export default function RecipeDetailPage() {
 
       {/* Actions */}
       <section className="px-5 mt-10 flex flex-col gap-2">
-        <Link
-          to={`/recipe/${recipe.id}/standardise`}
-          className="w-full px-4 py-3 rounded-full text-center font-medium bg-sage-100 dark:bg-sage-900/40 text-sage-800 dark:text-sage-200 border border-sage-200 dark:border-sage-800"
+        <button
+          type="button"
+          onClick={() => setConfirmStandardise(true)}
+          disabled={standardising}
+          className={cx(
+            'w-full px-4 py-3 rounded-full text-center font-medium border',
+            'bg-sage-100 dark:bg-sage-900/40 text-sage-800 dark:text-sage-200',
+            'border-sage-200 dark:border-sage-800',
+            standardising && 'opacity-60 cursor-wait',
+          )}
         >
-          ✨ Standardise Recipe
-        </Link>
+          {standardising ? '✨ Standardising…' : '✨ Standardise Recipe'}
+        </button>
+        {standardiseError && (
+          <p
+            role="alert"
+            className="text-sm text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/50 rounded-xl p-3"
+          >
+            {standardiseError}
+          </p>
+        )}
         <div className="flex gap-2">
           <Link
             to={`/recipe/${recipe.id}/edit`}
@@ -265,6 +339,18 @@ export default function RecipeDetailPage() {
         destructive
         onConfirm={handleDelete}
         onCancel={() => setConfirmDelete(false)}
+      />
+
+      <ConfirmDialog
+        open={confirmStandardise}
+        title="Standardise this recipe?"
+        message={
+          'The AI will rewrite the ingredients and steps in a standard format.\n\n' +
+          'Your existing version will be replaced. You can always edit it manually afterwards.'
+        }
+        confirmLabel="Standardise"
+        onConfirm={handleStandardise}
+        onCancel={() => setConfirmStandardise(false)}
       />
     </article>
   );

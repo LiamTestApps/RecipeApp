@@ -23,6 +23,7 @@ import { cx } from '../lib/utils';
 interface Props {
   ingredients: IngredientDraft[];
   onChange: (ingredients: IngredientDraft[]) => void;
+  /** Called when the Smart Extract button is clicked. Parent owns the modal. */
   onSmartExtractClick: () => void;
 }
 
