@@ -29,6 +29,7 @@ const TIMEOUT_MS = 30_000;
 export type GeminiErrorKind =
   | 'no-api-key'
   | 'invalid-api-key'
+  | 'invalid-url'
   | 'rate-limited'
   | 'network'
   | 'timeout'
@@ -54,6 +55,8 @@ export function messageForError(err: unknown): string {
         return 'Add a Gemini API key in Settings to use AI features.';
       case 'invalid-api-key':
         return 'That API key was rejected. Check it in Settings.';
+      case 'invalid-url':
+        return err.message; // already user-friendly; produced by extractFromUrl
       case 'rate-limited':
         return 'Too many requests. Try again in a minute.';
       case 'network':
@@ -206,23 +209,108 @@ export async function testApiKey(candidateKey: string): Promise<boolean> {
   }
 }
 
+/**
+ * Extract a recipe from a URL. Gemini's URL Context tool fetches the page
+ * server-side (no CORS issue), then the model parses it into our schema.
+ *
+ * Throws GeminiError with kind:
+ *   - 'no-api-key'        — user hasn't set a key
+ *   - 'invalid-url'       — couldn't even parse the input as a URL
+ *   - 'network'           — Gemini couldn't fetch the page (or our fetch failed)
+ *   - 'malformed-response'— page didn't contain a recognisable recipe
+ *   - the usual auth/rate/safety errors
+ */
+export async function extractFromUrl(rawUrl: string): Promise<ExtractedRecipe> {
+  const url = rawUrl.trim();
+
+  // Cheap client-side URL validation. Saves a Gemini call when the user
+  // pastes garbage or accidentally double-pastes.
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new GeminiError('invalid-url', "That doesn't look like a valid URL.");
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new GeminiError('invalid-url', 'URL must start with http:// or https://');
+  }
+
+  // Note: no responseSchema here — see CallOptions doc. The prompt does
+  // the schema's job by being very explicit about output shape.
+  const prompt = `Visit the URL below and extract the recipe.
+
+URL: ${url}
+
+Return ONLY a JSON object with this exact shape — no markdown fences, no commentary, no leading or trailing text:
+
+{
+  "title": "string — recipe title",
+  "prepTimeMinutes": number or null,
+  "cookTimeMinutes": number or null,
+  "ingredients": [
+    {
+      "quantity": "string or null — preserve fractions like '1/2' and ranges like '1-2'",
+      "unit": "string or null — keep the original unit (cup, g, tbsp, etc.)",
+      "name": "string — bare ingredient name only (e.g. 'onion', not '1 large onion, finely chopped')",
+      "notes": "string or null — descriptors like 'finely chopped', 'large', 'ripe'"
+    }
+  ],
+  "steps": ["string", "string", "..."]
+}
+
+Rules:
+- Do not invent details. If the page doesn't say a time, use null.
+- Steps are an array of strings, one step per logical action.
+- If the page is not a recipe (e.g. a blog index, an article, a 404 page), return {"title":"","ingredients":[],"steps":[]}.`;
+
+  return callGemini(prompt, { withUrlContext: true, timeoutMs: 60_000 });
+}
+
 // ─── Internal ────────────────────────────────────────────────────────────────
 
-async function callGemini(prompt: string): Promise<ExtractedRecipe> {
+interface CallOptions {
+  /**
+   * Whether to enable Gemini's URL Context tool, which lets the model
+   * fetch arbitrary web pages itself (no CORS).
+   *
+   * Important: on gemini-2.5-flash, the URL Context tool does NOT
+   * compose with `responseSchema` — Google only released that combo
+   * in the Gemini 3 series. So when this is true, we skip schema-mode
+   * and rely on prompt-level "return JSON only" instruction +
+   * defensive parsing.
+   */
+  withUrlContext?: boolean;
+  /** Larger timeout for URL fetches — pages can be slow. */
+  timeoutMs?: number;
+}
+
+async function callGemini(
+  prompt: string,
+  options: CallOptions = {},
+): Promise<ExtractedRecipe> {
   const apiKey = await getApiKey();
   if (!apiKey) throw new GeminiError('no-api-key', 'No API key set.');
 
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: 'application/json',
-      responseSchema: RECIPE_SCHEMA,
-    },
+  const generationConfig: Record<string, unknown> = {
+    temperature: 0.1,
   };
+  // Schema mode and URL-context tool are mutually exclusive on 2.5-flash.
+  if (!options.withUrlContext) {
+    generationConfig.responseMimeType = 'application/json';
+    generationConfig.responseSchema = RECIPE_SCHEMA;
+  }
 
+  const body: Record<string, unknown> = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig,
+  };
+  if (options.withUrlContext) {
+    body.tools = [{ url_context: {} }];
+  }
+
+  const timeoutMs = options.timeoutMs ?? TIMEOUT_MS;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   let response: Response;
   try {
@@ -265,7 +353,7 @@ async function callGemini(prompt: string): Promise<ExtractedRecipe> {
  * Pull the JSON recipe out of Gemini's response envelope. The model is
  * supposed to return JSON in the schema we provided, but we still
  * validate every field defensively — schemas are best-effort, not
- * guaranteed.
+ * guaranteed, and url-context mode skips schema entirely.
  */
 function parseGeminiResponse(payload: unknown): ExtractedRecipe {
   if (!isObject(payload)) {
@@ -300,6 +388,33 @@ function parseGeminiResponse(payload: unknown): ExtractedRecipe {
     throw new GeminiError('safety-blocked', 'Content blocked by safety filter.');
   }
 
+  // URL Context tool reports per-URL retrieval status. If we asked it to
+  // fetch a page and the fetch failed (404, blocked, etc.) we want a
+  // specific error message rather than letting the JSON parser fail
+  // mysteriously on an explanation paragraph.
+  const urlMeta =
+    (isObject(first.urlContextMetadata) && first.urlContextMetadata) ||
+    (isObject(first.url_context_metadata) && first.url_context_metadata);
+  if (urlMeta) {
+    const list = Array.isArray(urlMeta.urlMetadata)
+      ? urlMeta.urlMetadata
+      : Array.isArray(urlMeta.url_metadata)
+        ? urlMeta.url_metadata
+        : [];
+    const failed = list.find(
+      (m: unknown) =>
+        isObject(m) &&
+        (m.urlRetrievalStatus === 'URL_RETRIEVAL_STATUS_ERROR' ||
+          m.url_retrieval_status === 'URL_RETRIEVAL_STATUS_ERROR'),
+    );
+    if (failed) {
+      throw new GeminiError(
+        'network',
+        "Couldn't fetch that page. Check the URL and try again.",
+      );
+    }
+  }
+
   const content = first.content;
   if (!isObject(content) || !Array.isArray(content.parts)) {
     throw new GeminiError('malformed-response', 'Missing content parts.');
@@ -312,13 +427,18 @@ function parseGeminiResponse(payload: unknown): ExtractedRecipe {
     throw new GeminiError('malformed-response', 'No text in response.');
   }
 
+  // In url-context mode (no responseSchema), the model often wraps JSON
+  // in markdown fences (```json ... ```) despite our prompt telling it
+  // not to. Strip them before parsing.
+  const cleaned = stripJsonFences(textPart.text);
+
   let recipeJson: unknown;
   try {
-    recipeJson = JSON.parse(textPart.text);
+    recipeJson = JSON.parse(cleaned);
   } catch {
     throw new GeminiError(
       'malformed-response',
-      'Model output was not valid JSON.',
+      "Couldn't find a recipe on that page.",
     );
   }
 
@@ -378,4 +498,17 @@ function stringOrNull(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const t = v.trim();
   return t.length > 0 ? t : null;
+}
+
+/**
+ * Remove markdown code fences if the model wrapped its JSON in them.
+ * The fence might be ```json ... ``` or just ``` ... ```. Anything before
+ * the opening fence or after the closing fence is also stripped.
+ */
+function stripJsonFences(text: string): string {
+  const trimmed = text.trim();
+  // Look for an opening fence anywhere in the text.
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch?.[1]) return fenceMatch[1].trim();
+  return trimmed;
 }

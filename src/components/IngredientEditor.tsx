@@ -25,6 +25,8 @@ interface Props {
   onChange: (ingredients: IngredientDraft[]) => void;
   /** Called when the Smart Extract button is clicked. Parent owns the modal. */
   onSmartExtractClick: () => void;
+  /** Called when the From URL button is clicked. Parent owns the modal. */
+  onFromUrlClick: () => void;
 }
 
 /**
@@ -42,6 +44,7 @@ export default function IngredientEditor({
   ingredients,
   onChange,
   onSmartExtractClick,
+  onFromUrlClick,
 }: Props) {
   // The next uid to mint. Counter is per-component-instance and survives
   // for as long as the form is mounted, which is exactly what we need.
@@ -150,6 +153,13 @@ export default function IngredientEditor({
           className="px-3 py-2 rounded-full text-sm font-medium bg-sage-100 dark:bg-sage-900/40 text-sage-800 dark:text-sage-200 border border-sage-200 dark:border-sage-800"
         >
           ✨ Smart Extract
+        </button>
+        <button
+          type="button"
+          onClick={onFromUrlClick}
+          className="px-3 py-2 rounded-full text-sm font-medium bg-sage-100 dark:bg-sage-900/40 text-sage-800 dark:text-sage-200 border border-sage-200 dark:border-sage-800"
+        >
+          🔗 From URL
         </button>
       </div>
     </div>

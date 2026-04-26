@@ -14,6 +14,7 @@ import IngredientEditor from '../components/IngredientEditor';
 import StepEditor from '../components/StepEditor';
 import ConfirmDialog from '../components/ConfirmDialog';
 import SmartExtractModal from '../components/SmartExtractModal';
+import FromUrlModal from '../components/FromUrlModal';
 import type { ExtractedRecipe } from '../lib/gemini';
 import { cx } from '../lib/utils';
 
@@ -65,6 +66,7 @@ export default function RecipeEditPage({ mode }: Props) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [smartExtractOpen, setSmartExtractOpen] = useState(false);
+  const [fromUrlOpen, setFromUrlOpen] = useState(false);
 
   // Hydrate the draft from an existing recipe in edit mode.
   useEffect(() => {
@@ -230,6 +232,7 @@ export default function RecipeEditPage({ mode }: Props) {
             ingredients={draft.ingredients}
             onChange={(v) => setDraft({ ...draft, ingredients: v })}
             onSmartExtractClick={() => setSmartExtractOpen(true)}
+            onFromUrlClick={() => setFromUrlOpen(true)}
           />
         </Field>
 
@@ -318,6 +321,35 @@ export default function RecipeEditPage({ mode }: Props) {
             })),
           });
           setSmartExtractOpen(false);
+        }}
+      />
+
+      <FromUrlModal
+        open={fromUrlOpen}
+        onClose={() => setFromUrlOpen(false)}
+        onApply={(extracted: ExtractedRecipe, sourceUrl: string) => {
+          // Same apply policy as Smart Extract, plus auto-populate the
+          // Source URL field so the user can always click back to the
+          // original recipe.
+          setDraft({
+            ...draft,
+            title: draft.title.trim() ? draft.title : extracted.title,
+            prepTimeMinutes: extracted.prepTimeMinutes ?? draft.prepTimeMinutes,
+            cookTimeMinutes: extracted.cookTimeMinutes ?? draft.cookTimeMinutes,
+            sourceUrl: draft.sourceUrl ?? sourceUrl,
+            ingredients: extracted.ingredients.map((ing, idx) => ({
+              quantity: ing.quantity,
+              unit: ing.unit,
+              name: ing.name,
+              notes: ing.notes,
+              sortOrder: idx,
+            })),
+            steps: extracted.steps.map((instruction, idx) => ({
+              stepNumber: idx + 1,
+              instruction,
+            })),
+          });
+          setFromUrlOpen(false);
         }}
       />
     </>
