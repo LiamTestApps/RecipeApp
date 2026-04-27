@@ -16,6 +16,7 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@fontsource-variable/fraunces": "^5.1.0",
     "@fontsource-variable/manrope": "^5.1.0",
+    "@supabase/supabase-js": "^2.104.1",
     "dexie": "^4.0.10",
     "dexie-react-hooks": "^1.1.7",
     "react": "^18.3.1",
