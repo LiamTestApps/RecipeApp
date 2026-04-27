@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useLiveQuery } from 'dexie-react-hooks';
 import {
   getRecipeWithRelations,
   deleteRecipe,
   applyStandardisation,
 } from '../db';
+import type { RecipeWithRelations } from '../types';
 import { standardiseRecipe, messageForError } from '../lib/gemini';
 import { heroColors } from '../lib/colors';
 import { formatTime, cx } from '../lib/utils';
@@ -17,10 +17,21 @@ export default function RecipeDetailPage() {
   const navigate = useNavigate();
   const recipeId = id ? Number.parseInt(id, 10) : NaN;
 
-  const recipe = useLiveQuery(
-    () => (Number.isFinite(recipeId) ? getRecipeWithRelations(recipeId) : undefined),
-    [recipeId],
+  const [recipe, setRecipe] = useState<RecipeWithRelations | null | undefined>(
+    undefined,
   );
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    if (!Number.isFinite(recipeId)) return;
+    let cancelled = false;
+    getRecipeWithRelations(recipeId).then((r) => {
+      if (!cancelled) setRecipe(r);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [recipeId, reloadKey]);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmStandardise, setConfirmStandardise] = useState(false);
@@ -102,7 +113,7 @@ export default function RecipeDetailPage() {
         cleaned.prepTimeMinutes,
         cleaned.cookTimeMinutes,
       );
-      // Live query refreshes automatically.
+      setReloadKey((n) => n + 1);
     } catch (err) {
       setStandardiseError(messageForError(err));
     } finally {

@@ -1,68 +1,122 @@
-// Backup / restore (Spec §9). Exports recipes + ingredients + steps + tags
-// as JSON; imports the same shape with a "skip duplicates by title" merge.
+// Backup / restore. Exports recipes + ingredients + steps + tags as
+// JSON; imports the same shape with a "skip duplicates by title" merge.
 //
-// Schema version is included so future imports of older backups can be
-// upgraded if needed.
+// Migration note: previously read from / wrote to Dexie's local recipe
+// tables. Now reads from / writes to Supabase. The JSON format is
+// unchanged so backups taken before the migration are still importable.
+//
+// `deleteAllData` is kept as a Settings → Danger Zone action. It now
+// wipes the *shared* Supabase library — every device sees the result.
 
-import { db, DB_VERSION } from '../db';
+import { supabase } from '../supabase/client';
+import { DB_VERSION } from '../db';
 import type { BackupFile, Recipe } from '../types';
 import { normalise } from './utils';
 
-/**
- * Build a plain-object representation of every recipe (including its
- * ingredients, steps, tags) for download. We strip database-level ids
- * because they're not portable across installs.
- */
-export async function exportToJson(): Promise<BackupFile> {
-  const [recipes, ingredients, steps, tags, recipeTags] = await Promise.all([
-    db.recipes.toArray(),
-    db.ingredients.toArray(),
-    db.steps.toArray(),
-    db.tags.toArray(),
-    db.recipeTags.toArray(),
-  ]);
+// ─── Row shapes (snake_case from Postgres) ──────────────────────────────────
 
-  const tagsById = new Map(tags.map((t) => [t.id!, t.name]));
+interface RecipeRow {
+  id: number;
+  title: string;
+  prep_time_minutes: number | null;
+  cook_time_minutes: number | null;
+  source_url: string | null;
+  notes: string | null;
+  rating: number | null;
+  created_at: number;
+  updated_at: number;
+  is_standardised: boolean;
+}
+
+interface IngredientRow {
+  recipe_id: number;
+  quantity: string | null;
+  unit: string | null;
+  name: string;
+  notes: string | null;
+  sort_order: number;
+}
+
+interface StepRow {
+  recipe_id: number;
+  step_number: number;
+  instruction: string;
+}
+
+interface TagRow {
+  id: number;
+  name: string;
+}
+
+interface RecipeTagRow {
+  recipe_id: number;
+  tag_id: number;
+}
+
+// ─── Export ──────────────────────────────────────────────────────────────────
+
+export async function exportToJson(): Promise<BackupFile> {
+  const [recipesResp, ingResp, stepResp, tagResp, recipeTagResp] =
+    await Promise.all([
+      supabase.from('recipes').select('*'),
+      supabase.from('ingredients').select('*'),
+      supabase.from('steps').select('*'),
+      supabase.from('tags').select('*'),
+      supabase.from('recipe_tags').select('*'),
+    ]);
+
+  if (recipesResp.error) throw new Error(recipesResp.error.message);
+  if (ingResp.error) throw new Error(ingResp.error.message);
+  if (stepResp.error) throw new Error(stepResp.error.message);
+  if (tagResp.error) throw new Error(tagResp.error.message);
+  if (recipeTagResp.error) throw new Error(recipeTagResp.error.message);
+
+  const recipes = (recipesResp.data ?? []) as RecipeRow[];
+  const ingredients = (ingResp.data ?? []) as IngredientRow[];
+  const steps = (stepResp.data ?? []) as StepRow[];
+  const tags = (tagResp.data ?? []) as TagRow[];
+  const recipeTags = (recipeTagResp.data ?? []) as RecipeTagRow[];
+
+  const tagsById = new Map(tags.map((t) => [t.id, t.name]));
 
   return {
     version: DB_VERSION,
     exportedAt: Date.now(),
     recipes: recipes.map((r) => ({
       title: r.title,
-      prepTimeMinutes: r.prepTimeMinutes,
-      cookTimeMinutes: r.cookTimeMinutes,
-      sourceUrl: r.sourceUrl,
+      prepTimeMinutes: r.prep_time_minutes,
+      cookTimeMinutes: r.cook_time_minutes,
+      sourceUrl: r.source_url,
       notes: r.notes,
       rating: r.rating,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
-      isStandardised: r.isStandardised,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      isStandardised: r.is_standardised,
       ingredients: ingredients
-        .filter((i) => i.recipeId === r.id)
-        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .filter((i) => i.recipe_id === r.id)
+        .sort((a, b) => a.sort_order - b.sort_order)
         .map((i) => ({
           quantity: i.quantity,
           unit: i.unit,
           name: i.name,
           notes: i.notes,
-          sortOrder: i.sortOrder,
+          sortOrder: i.sort_order,
         })),
       steps: steps
-        .filter((s) => s.recipeId === r.id)
-        .sort((a, b) => a.stepNumber - b.stepNumber)
+        .filter((s) => s.recipe_id === r.id)
+        .sort((a, b) => a.step_number - b.step_number)
         .map((s) => ({
-          stepNumber: s.stepNumber,
+          stepNumber: s.step_number,
           instruction: s.instruction,
         })),
       tagNames: recipeTags
-        .filter((rt) => rt.recipeId === r.id)
-        .map((rt) => tagsById.get(rt.tagId))
+        .filter((rt) => rt.recipe_id === r.id)
+        .map((rt) => tagsById.get(rt.tag_id))
         .filter((n): n is string => typeof n === 'string'),
     })),
   };
 }
 
-/** Trigger a browser download of the backup. */
 export function downloadBackup(backup: BackupFile): void {
   const json = JSON.stringify(backup, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
@@ -80,6 +134,8 @@ export function downloadBackup(backup: BackupFile): void {
   URL.revokeObjectURL(url);
 }
 
+// ─── Import ──────────────────────────────────────────────────────────────────
+
 export interface ImportResult {
   added: number;
   skipped: number;
@@ -88,18 +144,20 @@ export interface ImportResult {
 
 /**
  * Validate-and-import. Skips recipes whose title already exists in the
- * library (case-insensitive). Doesn't touch existing data.
+ * library (case-insensitive). Tags are deduplicated against existing
+ * tags by name.
  *
- * Tags are deduplicated against existing tags by name.
+ * Note: this is no longer a single transaction. If the import is
+ * interrupted partway, you may end up with some recipes added and others
+ * not. Re-running the import is safe — already-imported titles are
+ * skipped on the second pass.
  */
-export async function importFromJson(
-  raw: unknown,
-): Promise<ImportResult> {
+export async function importFromJson(raw: unknown): Promise<ImportResult> {
   if (!isObject(raw)) {
     throw new Error("That doesn't look like a recipe-book backup.");
   }
   if (typeof raw.version !== 'number') {
-    throw new Error("Backup is missing a version number.");
+    throw new Error('Backup is missing a version number.');
   }
   if (raw.version > DB_VERSION) {
     throw new Error(
@@ -113,127 +171,181 @@ export async function importFromJson(
   const result: ImportResult = { added: 0, skipped: 0, skippedTitles: [] };
 
   // Index existing recipes by lowercase title for the dedupe check.
-  const existing = await db.recipes.toArray();
+  const { data: existingRows, error: existingErr } = await supabase
+    .from('recipes')
+    .select('title');
+  if (existingErr) throw new Error(existingErr.message);
+
   const existingTitles = new Set(
-    existing.map((r) => normalise(r.title)),
+    ((existingRows ?? []) as Array<{ title: string }>).map((r) => normalise(r.title)),
   );
 
-  await db.transaction(
-    'rw',
-    [db.recipes, db.ingredients, db.steps, db.tags, db.recipeTags],
-    async () => {
-      for (const item of raw.recipes as unknown[]) {
-        if (!isObject(item)) continue;
-        const title = typeof item.title === 'string' ? item.title.trim() : '';
-        if (!title) continue;
+  for (const item of raw.recipes as unknown[]) {
+    if (!isObject(item)) continue;
+    const title = typeof item.title === 'string' ? item.title.trim() : '';
+    if (!title) continue;
 
-        if (existingTitles.has(normalise(title))) {
-          result.skipped += 1;
-          result.skippedTitles.push(title);
-          continue;
-        }
+    if (existingTitles.has(normalise(title))) {
+      result.skipped += 1;
+      result.skippedTitles.push(title);
+      continue;
+    }
 
-        const now = Date.now();
-        const recipe: Omit<Recipe, 'id'> = {
-          title,
-          prepTimeMinutes: numericOrNull(item.prepTimeMinutes),
-          cookTimeMinutes: numericOrNull(item.cookTimeMinutes),
-          sourceUrl: stringOrNull(item.sourceUrl),
-          notes: stringOrNull(item.notes),
-          rating: ratingOrNull(item.rating),
-          createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
-          updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
-          isStandardised: item.isStandardised === true,
-        };
+    const now = Date.now();
+    const recipeInsert: Omit<Recipe, 'id'> = {
+      title,
+      prepTimeMinutes: numericOrNull(item.prepTimeMinutes),
+      cookTimeMinutes: numericOrNull(item.cookTimeMinutes),
+      sourceUrl: stringOrNull(item.sourceUrl),
+      notes: stringOrNull(item.notes),
+      rating: ratingOrNull(item.rating),
+      createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+      updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      isStandardised: item.isStandardised === true,
+    };
 
-        const recipeId = await db.recipes.add(recipe);
+    const { data: newRow, error: insertErr } = await supabase
+      .from('recipes')
+      .insert({
+        title: recipeInsert.title,
+        prep_time_minutes: recipeInsert.prepTimeMinutes,
+        cook_time_minutes: recipeInsert.cookTimeMinutes,
+        source_url: recipeInsert.sourceUrl,
+        notes: recipeInsert.notes,
+        rating: recipeInsert.rating,
+        created_at: recipeInsert.createdAt,
+        updated_at: recipeInsert.updatedAt,
+        is_standardised: recipeInsert.isStandardised,
+      })
+      .select('id')
+      .single();
+    if (insertErr || !newRow) {
+      throw new Error(
+        `Failed to import "${title}": ${insertErr?.message ?? 'unknown error'}`,
+      );
+    }
+    const recipeId = newRow.id as number;
 
-        const rawIngredients = Array.isArray(item.ingredients) ? item.ingredients : [];
-        if (rawIngredients.length > 0) {
-          await db.ingredients.bulkAdd(
-            rawIngredients
-              .filter(isObject)
-              .map((ing, idx) => ({
-                recipeId,
-                quantity: stringOrNull(ing.quantity),
-                unit: stringOrNull(ing.unit),
-                name: typeof ing.name === 'string' ? ing.name.trim() : '',
-                notes: stringOrNull(ing.notes),
-                sortOrder:
-                  typeof ing.sortOrder === 'number' ? ing.sortOrder : idx,
-              }))
-              .filter((ing) => ing.name.length > 0),
-          );
-        }
-
-        const rawSteps = Array.isArray(item.steps) ? item.steps : [];
-        if (rawSteps.length > 0) {
-          await db.steps.bulkAdd(
-            rawSteps
-              .filter(isObject)
-              .map((s, idx) => ({
-                recipeId,
-                stepNumber:
-                  typeof s.stepNumber === 'number' ? s.stepNumber : idx + 1,
-                instruction: typeof s.instruction === 'string' ? s.instruction : '',
-              }))
-              .filter((s) => s.instruction.trim().length > 0),
-          );
-        }
-
-        // Tag handling: reuse existing tags by name, create missing ones.
-        const tagNames = Array.isArray(item.tagNames)
-          ? (item.tagNames as unknown[])
-              .filter((n): n is string => typeof n === 'string')
-              .map(normalise)
-              .filter(Boolean)
-          : [];
-        if (tagNames.length > 0) {
-          const uniqueNames = Array.from(new Set(tagNames));
-          const existingTags = await db.tags
-            .where('name')
-            .anyOf(uniqueNames)
-            .toArray();
-          const idByName = new Map(existingTags.map((t) => [t.name, t.id!]));
-          for (const name of uniqueNames) {
-            if (!idByName.has(name)) {
-              const id = await db.tags.add({ name });
-              idByName.set(name, id);
-            }
-          }
-          await db.recipeTags.bulkAdd(
-            uniqueNames.map((name) => ({
-              recipeId,
-              tagId: idByName.get(name)!,
-            })),
-          );
-        }
-
-        existingTitles.add(normalise(title));
-        result.added += 1;
+    // Ingredients
+    const rawIngredients = Array.isArray(item.ingredients) ? item.ingredients : [];
+    if (rawIngredients.length > 0) {
+      const rows = rawIngredients
+        .filter(isObject)
+        .map((ing, idx) => ({
+          recipe_id: recipeId,
+          quantity: stringOrNull(ing.quantity),
+          unit: stringOrNull(ing.unit),
+          name: typeof ing.name === 'string' ? ing.name.trim() : '',
+          notes: stringOrNull(ing.notes),
+          sort_order: typeof ing.sortOrder === 'number' ? ing.sortOrder : idx,
+        }))
+        .filter((row) => row.name.length > 0);
+      if (rows.length > 0) {
+        const { error: ingErr } = await supabase.from('ingredients').insert(rows);
+        if (ingErr) throw new Error(ingErr.message);
       }
-    },
-  );
+    }
+
+    // Steps
+    const rawSteps = Array.isArray(item.steps) ? item.steps : [];
+    if (rawSteps.length > 0) {
+      const rows = rawSteps
+        .filter(isObject)
+        .map((s, idx) => ({
+          recipe_id: recipeId,
+          step_number: typeof s.stepNumber === 'number' ? s.stepNumber : idx + 1,
+          instruction: typeof s.instruction === 'string' ? s.instruction : '',
+        }))
+        .filter((row) => row.instruction.trim().length > 0);
+      if (rows.length > 0) {
+        const { error: stepErr } = await supabase.from('steps').insert(rows);
+        if (stepErr) throw new Error(stepErr.message);
+      }
+    }
+
+    // Tags: reuse existing by name, create missing.
+    const tagNames = Array.isArray(item.tagNames)
+      ? (item.tagNames as unknown[])
+          .filter((n): n is string => typeof n === 'string')
+          .map(normalise)
+          .filter(Boolean)
+      : [];
+    if (tagNames.length > 0) {
+      const uniqueNames = Array.from(new Set(tagNames));
+
+      const { data: existingTags, error: existTagErr } = await supabase
+        .from('tags')
+        .select('*')
+        .in('name', uniqueNames);
+      if (existTagErr) throw new Error(existTagErr.message);
+
+      const idByName = new Map(
+        ((existingTags ?? []) as TagRow[]).map((t) => [t.name, t.id]),
+      );
+
+      const missing = uniqueNames.filter((n) => !idByName.has(n));
+      if (missing.length > 0) {
+        const { data: created, error: createErr } = await supabase
+          .from('tags')
+          .insert(missing.map((name) => ({ name })))
+          .select('*');
+        if (createErr) throw new Error(createErr.message);
+        for (const t of (created ?? []) as TagRow[]) {
+          idByName.set(t.name, t.id);
+        }
+      }
+
+      const linkRows = uniqueNames
+        .map((name) => idByName.get(name))
+        .filter((id): id is number => id !== undefined)
+        .map((tagId) => ({ recipe_id: recipeId, tag_id: tagId }));
+
+      if (linkRows.length > 0) {
+        const { error: linkErr } = await supabase
+          .from('recipe_tags')
+          .upsert(linkRows, {
+            onConflict: 'recipe_id,tag_id',
+            ignoreDuplicates: true,
+          });
+        if (linkErr) throw new Error(linkErr.message);
+      }
+    }
+
+    existingTitles.add(normalise(title));
+    result.added += 1;
+  }
 
   return result;
 }
 
-/** Wipe every table. Used by Settings → Danger zone. */
+// ─── Wipe everything ─────────────────────────────────────────────────────────
+
+/**
+ * Wipe every recipe, ingredient, step, tag, and recipe_tag. Used by
+ * Settings → Danger Zone.
+ *
+ * IMPORTANT: this affects the *shared* library — every device sees the
+ * result. The Settings UI's confirm dialog should make this clear.
+ *
+ * Settings (API key, theme override) live in local IndexedDB and are
+ * NOT touched here.
+ */
 export async function deleteAllData(): Promise<void> {
-  await db.transaction(
-    'rw',
-    [db.recipes, db.ingredients, db.steps, db.tags, db.recipeTags, db.settings],
-    async () => {
-      await db.recipes.clear();
-      await db.ingredients.clear();
-      await db.steps.clear();
-      await db.tags.clear();
-      await db.recipeTags.clear();
-      // Note: we deliberately keep `settings` (e.g. API key) — wiping data
-      // shouldn't make the user re-paste their key. There's a separate
-      // "Remove API key" button for that.
-    },
-  );
+  // Delete order respects foreign-key constraints, even though our
+  // FKs cascade. Tags last because recipe_tags references them.
+  // Note: Postgres needs a WHERE clause for DELETE under our setup.
+  // We use a tautology that matches every row.
+  const all = { name: 'never_matches_this_negation' }; // dummy, see below
+
+  // We use .neq('id', 0) as a "match all" trick — every id is non-zero
+  // because Postgres bigint identity columns start at 1.
+  void all;
+
+  await supabase.from('recipe_tags').delete().neq('id', 0);
+  await supabase.from('ingredients').delete().neq('id', 0);
+  await supabase.from('steps').delete().neq('id', 0);
+  await supabase.from('recipes').delete().neq('id', 0);
+  await supabase.from('tags').delete().neq('id', 0);
 }
 
 // ─── Validation helpers ──────────────────────────────────────────────────────

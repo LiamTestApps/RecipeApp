@@ -1,52 +1,34 @@
-// Dexie schema for the recipe book.
-// Spec reference: requirements §3.
+// Dexie schema for the recipe app's *local-only* data.
 //
-// MIGRATION RULES (Spec §3.6 + §12):
-//   - Increment the version number for ANY schema change.
-//   - Provide an `.upgrade()` callback for any version that adds/renames fields.
-//   - Destructive upgrades are forbidden — existing user data must survive.
+// Recipes/ingredients/steps/tags moved to Supabase as part of the migration
+// to a shared library. This file now only manages per-device settings:
+// the Gemini API key and the theme override. These are intentionally
+// local — they're per-user-of-this-browser, not part of the shared
+// recipe library.
+//
+// Migration history:
+//   v1: full schema (recipes, ingredients, steps, tags, recipe_tags, settings)
+//   v2: redefined to shrink the local DB to just settings; existing
+//       local recipe data is left in place (Dexie ignores tables not
+//       declared in the latest version) but the app no longer reads it.
 
 import Dexie, { type Table } from 'dexie';
-import type {
-  Recipe,
-  Ingredient,
-  Step,
-  Tag,
-  RecipeTag,
-  Setting,
-} from '../types';
+import type { Setting } from '../types';
 
-/** Single source of truth for the current schema version. */
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
-/** Settings table keys we use. Centralised so we don't typo them. */
 export const SETTING_KEYS = {
   GEMINI_API_KEY: 'geminiApiKey',
-  THEME_OVERRIDE: 'themeOverride', // 'light' | 'dark' | unset (= follow system)
+  THEME_OVERRIDE: 'themeOverride',
 } as const;
 
-class RecipeDB extends Dexie {
-  recipes!: Table<Recipe, number>;
-  ingredients!: Table<Ingredient, number>;
-  steps!: Table<Step, number>;
-  tags!: Table<Tag, number>;
-  recipeTags!: Table<RecipeTag, number>;
+class LocalDB extends Dexie {
   settings!: Table<Setting, string>;
 
   constructor() {
     super('RecipeBookDB');
 
-    // ── Version 1 ────────────────────────────────────────────────────────
-    // Indexes per spec §3:
-    //   recipes:     title, rating, createdAt
-    //   ingredients: recipeId, name
-    //   steps:       recipeId
-    //   tags:        name (unique)
-    //   recipeTags:  [recipeId+tagId] compound unique, plus singletons
-    //                so we can query "all tags for a recipe" and vice versa.
-    //   settings:    key (unique primary)
-    //
-    // The `&` prefix means "unique"; `++id` means auto-increment primary key.
+    // Original schema. Kept here so existing users' DBs upgrade cleanly.
     this.version(1).stores({
       recipes: '++id, title, rating, createdAt',
       ingredients: '++id, recipeId, name',
@@ -56,17 +38,18 @@ class RecipeDB extends Dexie {
       settings: '&key',
     });
 
-    // Future versions go here:
-    //
-    // this.version(2).stores({ recipes: '++id, title, rating, createdAt, photoBlobId' })
-    //   .upgrade(tx => tx.table('recipes').toCollection().modify(r => { r.photoBlobId = null; }));
+    // v2: only the settings table is declared. The other stores still
+    // physically exist in any v1 user's IndexedDB but won't be touched.
+    // We don't delete them — that would risk a destructive upgrade,
+    // and they cost nothing sitting there.
+    this.version(2).stores({
+      settings: '&key',
+    });
   }
 }
 
-/** The single database instance used throughout the app. */
-export const db = new RecipeDB();
+export const db = new LocalDB();
 
-/** Open the DB explicitly so we can surface failures early. Call once at app start. */
 export async function initDb(): Promise<void> {
   if (!db.isOpen()) {
     await db.open();

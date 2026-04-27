@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
 import { listRecipesForHome } from '../db';
 import RecipeCard from '../components/RecipeCard';
 import SearchBar from '../components/SearchBar';
@@ -17,8 +16,25 @@ import { normalise } from '../lib/utils';
 export default function HomePage() {
   // useLiveQuery re-runs when any of the recipe/ingredient/tag tables change,
   // so adding or editing a recipe updates the list with no manual refetch.
-  const recipes = useLiveQuery(() => listRecipesForHome(), []);
+  const [recipes, setRecipes] = useState<
+    Awaited<ReturnType<typeof listRecipesForHome>> | undefined
+  >(undefined);
   const isLoading = recipes === undefined;
+
+  useEffect(() => {
+    let cancelled = false;
+    listRecipesForHome()
+      .then((rows) => {
+        if (!cancelled) setRecipes(rows);
+      })
+      .catch((err) => {
+        console.error('Failed to load recipes:', err);
+        if (!cancelled) setRecipes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [searchInput, setSearchInput] = useState('');
   const debouncedSearch = useDebounced(searchInput, 150);

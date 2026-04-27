@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useLiveQuery } from 'dexie-react-hooks';
 import {
   getRecipeWithRelations,
   createRecipe,
   updateRecipe,
 } from '../db';
+import type { RecipeWithRelations } from '../types';
 import type { RecipeDraft } from '../types';
 import EditHeader from '../components/EditHeader';
 import StarRating from '../components/StarRating';
@@ -49,13 +49,20 @@ export default function RecipeEditPage({ mode }: Props) {
   const recipeId = id ? Number.parseInt(id, 10) : NaN;
 
   // Existing recipe (edit mode only)
-  const existing = useLiveQuery(
-    () =>
-      mode === 'edit' && Number.isFinite(recipeId)
-        ? getRecipeWithRelations(recipeId)
-        : Promise.resolve(undefined),
-    [mode, recipeId],
-  );
+const [existing, setExisting] = useState<
+    RecipeWithRelations | null | undefined
+  >(mode === 'create' ? null : undefined);
+
+  useEffect(() => {
+    if (mode !== 'edit' || !Number.isFinite(recipeId)) return;
+    let cancelled = false;
+    getRecipeWithRelations(recipeId).then((r) => {
+      if (!cancelled) setExisting(r);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, recipeId]);
 
   const [draft, setDraft] = useState<RecipeDraft>(EMPTY_DRAFT);
   /** The draft we'd compare against for "is dirty?" checks. */

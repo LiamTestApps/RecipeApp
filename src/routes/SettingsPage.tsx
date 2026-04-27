@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
 import {
   getApiKey,
   setApiKey,
@@ -22,6 +21,7 @@ import {
   type ImportResult,
 } from '../lib/backup';
 import ConfirmDialog from '../components/ConfirmDialog';
+import type { Tag } from '../types';
 import { capitalise, cx } from '../lib/utils';
 
 type ThemeMode = 'system' | 'light' | 'dark';
@@ -57,7 +57,17 @@ export default function SettingsPage() {
 // ─── 1. API key ──────────────────────────────────────────────────────────────
 
 function ApiKeySection() {
-  const stored = useLiveQuery(() => getApiKey(), []);
+  const [stored, setStored] = useState<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    getApiKey().then((v) => {
+      if (!cancelled) setStored(v);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [draft, setDraft] = useState('');
   const [reveal, setReveal] = useState(false);
   const [busy, setBusy] = useState<null | 'save' | 'test' | 'remove'>(null);
@@ -211,7 +221,20 @@ function ApiKeySection() {
 // ─── 2. Appearance ───────────────────────────────────────────────────────────
 
 function AppearanceSection() {
-  const stored = useLiveQuery(() => getSetting(SETTING_KEYS.THEME_OVERRIDE), []);
+  const [stored, setStored] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      getSetting(SETTING_KEYS.THEME_OVERRIDE).then((v) => {
+        if (!cancelled) setStored(v);
+      });
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const current: ThemeMode =
     stored === 'light' ? 'light' : stored === 'dark' ? 'dark' : 'system';
@@ -219,8 +242,10 @@ function AppearanceSection() {
   const setMode = async (mode: ThemeMode) => {
     if (mode === 'system') {
       await deleteSetting(SETTING_KEYS.THEME_OVERRIDE);
+      setStored(undefined);
     } else {
       await setSetting(SETTING_KEYS.THEME_OVERRIDE, mode);
+      setStored(mode);
     }
     applyTheme(mode);
   };
@@ -386,10 +411,26 @@ function DataSection() {
 // ─── 4. Tag manager ──────────────────────────────────────────────────────────
 
 function TagSection() {
-  const tags = useLiveQuery(() => listAllTags(), []) ?? [];
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAllTags().then((rows) => {
+      if (!cancelled) setTags(rows);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  const reload = () => setRefreshKey((n) => n + 1);
 
   return (
-    <Section title="Tags" subtitle={`${tags.length} tag${tags.length === 1 ? '' : 's'}`}>
+    <Section
+      title="Tags"
+      subtitle={`${tags.length} tag${tags.length === 1 ? '' : 's'}`}
+    >
       {tags.length === 0 ? (
         <p className="text-sm text-stone-500 dark:text-stone-400">
           No tags yet. Add tags when creating a recipe.
@@ -397,7 +438,7 @@ function TagSection() {
       ) : (
         <ul className="space-y-1">
           {tags.map((t) => (
-            <TagRow key={t.id} id={t.id!} name={t.name} />
+            <TagRow key={t.id} id={t.id!} name={t.name} onChange={reload} />
           ))}
         </ul>
       )}
@@ -405,17 +446,36 @@ function TagSection() {
   );
 }
 
-function TagRow({ id, name }: { id: number; name: string }) {
+function TagRow({
+  id,
+  name,
+  onChange,
+}: {
+  id: number;
+  name: string;
+  onChange: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const count = useLiveQuery(() => getRecipeCountForTag(id), [id]);
+  const [count, setCount] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    getRecipeCountForTag(id).then((n) => {
+      if (!cancelled) setCount(n);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   const handleSave = async () => {
     const next = draft.trim().toLowerCase();
     if (next && next !== name) {
       try {
         await renameTag(id, next);
+        onChange();
       } catch {
         // Probably a unique-name collision. Silently revert.
         setDraft(name);
@@ -429,6 +489,7 @@ function TagRow({ id, name }: { id: number; name: string }) {
   const handleDelete = async () => {
     setConfirmRemove(false);
     await deleteTag(id);
+    onChange();
   };
 
   return (

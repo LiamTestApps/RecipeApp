@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
 import { listAllTags } from '../db';
+import type { Tag } from '../types';
 import TagChip from './TagChip';
 import { cx, normalise } from '../lib/utils';
 
@@ -14,7 +14,17 @@ interface Props {
  * Enter creates a new one (or selects the highlighted suggestion).
  */
 export default function TagInput({ values, onChange }: Props) {
-  const allTags = useLiveQuery(() => listAllTags(), []) ?? [];
+  const [allTags, setAllTags] = useState<Tag[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAllTags().then((rows) => {
+      if (!cancelled) setAllTags(rows);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [draft, setDraft] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
