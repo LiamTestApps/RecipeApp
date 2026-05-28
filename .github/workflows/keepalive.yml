@@ -1,0 +1,59 @@
+name: Supabase keep-alive
+
+# Pings the Supabase database every 3 days so the free-tier project
+# doesn't pause after 7 days of inactivity.
+#
+# Why 3 days and not 6: GitHub's scheduled workflows run on a best-effort
+# basis and can be delayed (or rarely skipped) during high load. The 3-day
+# interval leaves a comfortable margin under Supabase's 7-day pause window.
+#
+# The ping does a genuine (tiny) query against the `recipes` table so it
+# actually wakes Postgres, not just the API gateway. If the table is empty
+# the query still counts as activity — we ask for the row COUNT with a
+# HEAD request, which touches the database without transferring any rows.
+
+on:
+  schedule:
+    # Cron is in UTC. "0 6 */3 * *" = 06:00 UTC every 3rd day of the month.
+    # Note: "*/3" on day-of-month resets at month boundaries, so the gap
+    # between the last ping of one month and the 3rd of the next can be up
+    # to ~4 days. Still well under 7. Simplicity wins over a perfectly even
+    # 72-hour cadence here.
+    - cron: '0 6 */3 * *'
+  # Lets you trigger it by hand from the Actions tab to test it.
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase REST API
+        env:
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          echo "Pinging Supabase to keep the project awake..."
+
+          # HEAD request against the recipes table. `Prefer: count=exact`
+          # makes PostgREST run a COUNT query (touches Postgres) while
+          # `Range: 0-0` ensures no row data is returned. We only care
+          # that the database responds.
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X HEAD \
+            "${SUPABASE_URL}/rest/v1/recipes?select=id" \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            -H "Prefer: count=exact" \
+            -H "Range: 0-0")
+
+          echo "HTTP status: ${HTTP_STATUS}"
+
+          # 2xx or 206 (partial content, expected with the Range header)
+          # all mean the database responded. Anything else is a failure
+          # we want to know about.
+          if [ "${HTTP_STATUS}" -ge 200 ] && [ "${HTTP_STATUS}" -lt 300 ]; then
+            echo "Success — Supabase is awake."
+          else
+            echo "::error::Unexpected status ${HTTP_STATUS}. The keep-alive may not be working."
+            exit 1
+          fi
