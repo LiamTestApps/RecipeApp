@@ -1,58 +1,57 @@
 name: Supabase keep-alive
 
-# Pings the Supabase database every 3 days so the free-tier project
-# doesn't pause after 7 days of inactivity.
+# Pings the Supabase database daily so the free-tier project doesn't pause.
 #
-# Why 3 days and not 6: GitHub's scheduled workflows run on a best-effort
-# basis and can be delayed (or rarely skipped) during high load. The 3-day
-# interval leaves a comfortable margin under Supabase's 7-day pause window.
+# Why we write rather than read: the activity detector watches Postgres
+# query traffic. A REST GET/HEAD against PostgREST can sometimes be
+# served from gateway-level caches without touching Postgres — which
+# means it doesn't register as activity. An UPDATE can't be cached
+# (the database has to actually perform the write), so it always counts.
 #
-# The ping does a genuine (tiny) query against the `recipes` table so it
-# actually wakes Postgres, not just the API gateway. If the table is empty
-# the query still counts as activity — we ask for the row COUNT with a
-# HEAD request, which touches the database without transferring any rows.
+# Why daily rather than every-3-days: writes are extremely cheap, and
+# daily pings remove any ambiguity about timing edge cases at month
+# boundaries or during GitHub Actions delays.
 
 on:
   schedule:
-    # Cron is in UTC. "0 6 */3 * *" = 06:00 UTC every 3rd day of the month.
-    # Note: "*/3" on day-of-month resets at month boundaries, so the gap
-    # between the last ping of one month and the 3rd of the next can be up
-    # to ~4 days. Still well under 7. Simplicity wins over a perfectly even
-    # 72-hour cadence here.
-    - cron: '0 6 */3 * *'
-  # Lets you trigger it by hand from the Actions tab to test it.
+    # Daily at 06:00 UTC.
+    - cron: '0 6 * * *'
+  # Lets you trigger it manually from the Actions tab.
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase REST API
+      - name: Heartbeat write to Supabase
         env:
           SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: |
-          echo "Pinging Supabase to keep the project awake..."
+          echo "Writing heartbeat row to Supabase..."
 
-          # HEAD request against the recipes table. `Prefer: count=exact`
-          # makes PostgREST run a COUNT query (touches Postgres) while
-          # `Range: 0-0` ensures no row data is returned. We only care
-          # that the database responds.
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X HEAD \
-            "${SUPABASE_URL}/rest/v1/recipes?select=id" \
+          # PATCH updates the single row (id=1) in the heartbeat table.
+          # `last_ping_at=now()` runs server-side. We don't care about
+          # the response body, only that the write succeeded.
+          HTTP_STATUS=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X PATCH \
+            "${SUPABASE_URL}/rest/v1/heartbeat?id=eq.1" \
             -H "apikey: ${SUPABASE_ANON_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
-            -H "Prefer: count=exact" \
-            -H "Range: 0-0")
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d '{"last_ping_at": "now()"}')
 
           echo "HTTP status: ${HTTP_STATUS}"
+          echo "Response body:"
+          cat /tmp/response.json
+          echo ""
 
-          # 2xx or 206 (partial content, expected with the Range header)
-          # all mean the database responded. Anything else is a failure
-          # we want to know about.
+          # PostgREST returns 200 for an update with return=representation.
+          # 204 would also be fine (return=minimal). Anything 2xx means
+          # the write hit Postgres.
           if [ "${HTTP_STATUS}" -ge 200 ] && [ "${HTTP_STATUS}" -lt 300 ]; then
-            echo "Success — Supabase is awake."
+            echo "Success — heartbeat updated."
           else
             echo "::error::Unexpected status ${HTTP_STATUS}. The keep-alive may not be working."
             exit 1
