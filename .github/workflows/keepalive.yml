@@ -1,39 +1,31 @@
 name: Supabase keep-alive
 
-# Pings the Supabase database daily so the free-tier project doesn't pause.
+# Keeps the free-tier Supabase project from pausing.
 #
-# Why we write rather than read: the activity detector watches Postgres
-# query traffic. A REST GET/HEAD against PostgREST can sometimes be
-# served from gateway-level caches without touching Postgres — which
-# means it doesn't register as activity. An UPDATE can't be cached
-# (the database has to actually perform the write), so it always counts.
+# Supabase pauses Free projects that show "low activity" over 7 days and
+# says "a few user requests to the database each day" is typically enough.
+# One request a day turned out NOT to be enough, so this runs every 6 hours
+# and makes a write + a read each time (8 requests/day).
 #
-# Why daily rather than every-3-days: writes are extremely cheap, and
-# daily pings remove any ambiguity about timing edge cases at month
-# boundaries or during GitHub Actions delays.
+# Minute 17 instead of 0: GitHub delays and sometimes drops scheduled runs
+# at the top of the hour because everyone schedules there.
 
 on:
   schedule:
-    # Daily at 06:00 UTC.
-    - cron: '0 6 * * *'
-  # Lets you trigger it manually from the Actions tab.
+    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Heartbeat write to Supabase
+      - name: Heartbeat write + read
         env:
           SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: |
-          echo "Writing heartbeat row to Supabase..."
-
-          # PATCH updates the single row (id=1) in the heartbeat table.
-          # `last_ping_at=now()` runs server-side. We don't care about
-          # the response body, only that the write succeeded.
-          HTTP_STATUS=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+          # --- Write ---
+          HTTP_STATUS=$(curl -s -o /tmp/write.json -w "%{http_code}" \
             -X PATCH \
             "${SUPABASE_URL}/rest/v1/heartbeat?id=eq.1" \
             -H "apikey: ${SUPABASE_ANON_KEY}" \
@@ -42,17 +34,32 @@ jobs:
             -H "Prefer: return=representation" \
             -d '{"last_ping_at": "now()"}')
 
-          echo "HTTP status: ${HTTP_STATUS}"
-          echo "Response body:"
-          cat /tmp/response.json
-          echo ""
+          echo "Write status: ${HTTP_STATUS}"
+          cat /tmp/write.json; echo ""
 
-          # PostgREST returns 200 for an update with return=representation.
-          # 204 would also be fine (return=minimal). Anything 2xx means
-          # the write hit Postgres.
-          if [ "${HTTP_STATUS}" -ge 200 ] && [ "${HTTP_STATUS}" -lt 300 ]; then
-            echo "Success — heartbeat updated."
-          else
-            echo "::error::Unexpected status ${HTTP_STATUS}. The keep-alive may not be working."
+          if [ "${HTTP_STATUS}" -lt 200 ] || [ "${HTTP_STATUS}" -ge 300 ]; then
+            echo "::error::Write failed with status ${HTTP_STATUS}."
             exit 1
           fi
+
+          # A 200 with [] means zero rows were updated (RLS or missing row).
+          if [ "$(cat /tmp/write.json)" = "[]" ]; then
+            echo "::error::Write returned 200 but updated zero rows."
+            exit 1
+          fi
+
+          # --- Read ---
+          HTTP_STATUS=$(curl -s -o /tmp/read.json -w "%{http_code}" \
+            "${SUPABASE_URL}/rest/v1/heartbeat?select=id,last_ping_at" \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}")
+
+          echo "Read status: ${HTTP_STATUS}"
+          cat /tmp/read.json; echo ""
+
+          if [ "${HTTP_STATUS}" -lt 200 ] || [ "${HTTP_STATUS}" -ge 300 ]; then
+            echo "::error::Read failed with status ${HTTP_STATUS}."
+            exit 1
+          fi
+
+          echo "Keep-alive OK."
